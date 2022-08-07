@@ -18,10 +18,10 @@ pub const JClass = struct {
         string = 0x01,
         methodHandle = 0x0F,
         methodType = 0x10,
-        dynamic = 0x11,
+        varDynamic = 0x11,
         invokeDynamic = 0x12,
         module = 0x13,
-        package = 0x1D
+        package = 0x14
     };
 
     pub const JConst = struct {
@@ -35,7 +35,12 @@ pub const JClass = struct {
         integer: i32 = undefined,
         long: i64 = undefined,
         float: f32 = undefined,
-        double: f64 = undefined
+        double: f64 = undefined,
+
+        refKind: u8 = undefined,
+        refIndex: u16 = undefined,
+
+        bootstrapIndex: u16 = undefined
     };
 
     pub const JAttributeTag = enum(u16) {
@@ -57,8 +62,19 @@ pub const JClass = struct {
         RuntimeInvisibleAnnotations,
         RuntimeVisibleParameterAnnotations,
         RuntimeInvisibleParameterAnnotations,
+        RuntimeVisibleTypeAnnotations,
+        RuntimeInvisibleTypeAnnotations,
         AnnotationDefault,
-        BootstrapMethods
+        BootstrapMethods,
+        
+        MethodParameters,
+        Module,
+        ModulePackages,
+        ModuleMainClass,
+        NestHost,
+        NestMembers,
+        Record,
+        PermittedSubclasses
     };
 
     pub const JAttribute = struct {
@@ -97,26 +113,7 @@ pub const JClass = struct {
 
     const Self = @This();
     
-    pub fn info(self: *Self) !void {
-        log.info("[K] Name => {s}", .{self.name});
-        log.info("[K] Super => {s}", .{self.super});
-        log.info("[K] Flags => 0x{x}", .{self.flags});
-
-        log.info("[K] CP Size => {}", .{self.constant_pool.len});
-        for (self.constant_pool) |jConst| {
-            log.info("[K] CP Item Tag: 0x{x}", .{@enumToInt(jConst.tag)});
-        }
-
-        log.info("[K] IF Size => {}", .{self.interfaces.len});
-        log.info("[K] FL Size => {}", .{self.fields.len});
-        log.info("[K] MT Size => {}", .{self.methods.len});
-        for (self.methods) |jMethod| {
-           log.info("[K] MT Attributes :=> {} items", .{jMethod.attributes.len});
-           for (jMethod.attributes) |jMethodAttribute| {
-                log.info("[K] MT Attribute: {s}", .{@tagName(jMethodAttribute.tag)});
-            }
-        }
-
-        log.info("[K] AT Size => {}", .{self.attributes.len});
+    pub fn init() Self {
+        return Self {};
     }
 };

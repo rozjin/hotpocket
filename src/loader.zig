@@ -2,227 +2,209 @@ const std = @import("std");
 const fs = std.fs;
 const io = std.io;
 const log = std.log;
+const mem = std.mem;
+const zip = std.compress.deflate;
 
-const reader = @import("reader.zig");
-const class = @import("class.zig");
+const File = fs.File;
 
-const Reader = reader.Reader;
+const jReaderDef = @import("reader.zig");
+const jClassDef = @import("class.zig");
+const jParserDef = @import("parser.zig");
+const rangeDef = @import("range.zig");
 
-const JClass = class.JClass;
-const JConst = JClass.JConst;
-const JConstTag = JClass.JConstTag;
+const range = rangeDef.range;
 
-const JClassLoader = struct {
-    jClassAllocator:  *std.mem.Allocator = undefined,
+const Reader = jReaderDef.Reader;
+const JClass = jClassDef.JClass;
+const JClassParser = jParserDef.JClassParser;
+
+pub const JLoader = struct {
+    const Compress = struct {
+        const None: u16 = 0;
+        const Deflate: u16 = 8;
+    };
+
+    const JarHeaderMagic: u32 = 0x04034b50;
+    const JarHeader = packed struct {
+        magic: u32,
+        version: u16,
+        flag: u16,
+        compress: u16,
+        modTime: u16,
+        modDate: u16,
+
+        crc: u32,
+        cmpSz: u32,
+        dmpSz: u32,
+        name_len: u16,
+        extra_len: u16,
+
+        pub fn size(self: *const JarHeader) usize {
+            return @sizeOf(JarHeader) + self.name_len + self.extra_len;
+        }
+    };
+
+    const JarRecordMagic: u32 = 0x02014b50;
+    const JarRecordMax: u16 = 65535;
+    const JarRecord = packed struct {
+        magic: u32,
+        madeBy: u16,
+        version: u16,
+        flag: u16,
+        compress: u16,
+        modTime: u16,
+        modDate: u16,
+
+        crc: u32,
+        cmpSz: u32,
+        dmpSz: u32,
+        name_len: u16,
+        extra_len: u16,
+        comment_len: u16,
+        disk: u16,
+        iAttr: u16,
+        eAttr: u32,
+        off: u32,
+
+        pub fn size(self: *const JarRecord) usize {
+            return @sizeOf(JarRecord) + self.name_len + self.extra_len + self.comment_len;
+        }
+    };
+
+    const JarEndMagic: u32 = 0x06054b50;
+    const JarEnd = packed struct {
+        magic: u32,
+        n_disk: u16,
+        s_disk: u16,
+        n_records: u16,
+        t_records: u16,
+        size: u32,
+        off: u32,
+        comment_len: u16
+    };
+
+    parser: JClassParser = undefined,
+    arena: std.heap.ArenaAllocator = undefined,
 
     const Self = @This();
-    const JMagic = 0xCAFEBABE;
 
-    pub fn init(buf: []u8) Self {
+    pub fn init() Self {
         return Self {
-            .jClassAllocator = &std.heap.ArenaAllocator
+            .parser = JClassParser.init(),
+            .arena = std.heap.ArenaAllocator
                 .init(std.heap.page_allocator)
-                .allocator
         };
     }
 
-    pub fn parseClass(self: *Self, buf: []u8) !JClass {
+    fn allocator(self: *Self) *std.mem.Allocator {
+        return &self.arena.allocator;
+    }
+
+    pub fn loadClass(self: *Self, class_path: []const u8) !JClass {
+        var class: File = try fs.openFileAbsolute(class_path, .{});
+        var classtat: File.Stat = try class.stat();
+        var classize: usize = classtat.size;
+
+        var buf = try self.allocator().alloc(u8, classize);
+        defer self.allocator().free(buf);
+
+        _ = try class.read(buf);
+
+        return self.parser.parseClass(buf);
+    }
+
+    pub fn loadJars(self: *Self, jars: [][]const u8) ![]JClass {
+        var jarClasses = std.ArrayList(JClass).init(self.allocator());
+        defer jarClasses.deinit();
+
+        for (jars) |jar| {
+            var classes: []JClass = try self.loadJar(jar);
+            try jarClasses.appendSlice(classes);
+        }
+
+        return jarClasses.toOwnedSlice();
+    }
+
+    fn loadJar(self: *Self, jar_path: []const u8) ![]JClass {
+        var jar: File = try fs.openFileAbsolute(jar_path, .{});
+        var jarstat: File.Stat = try jar.stat();
+        var jarsize: usize = jarstat.size;
+
+        if (jarsize < 22) {
+            return error.JarUnderflow;
+        }
+
+        var buf = try self.allocator().alloc(u8, jarsize);
+        defer self.allocator().free(buf);
+
+        _ = try jar.read(buf);
+
         var reader = Reader.init(buf);
-
-        var magic: u32 = try reader.read(u32);
-        if (magic != JMagic) {
-            log.err("[P] Bad magic number {x}", .{magic});
-            return error.JBadMagicNumber;
+        var eocd: JarEnd = try reader.readEof(JarEnd);
+        if (eocd.magic != JarEndMagic) {
+            log.err("[L] Bad magic number {x}", .{eocd.magic});
+            return error.JarBadMagicNumber;
         }
 
-        var jClass = try self.jClassAllocator.create(JClass);
-        errdefer self.jClassAllocator.destroy(jClass);
+        var classes = std.ArrayList(JClass).init(self.allocator());
+        defer classes.deinit();
 
-        try self.parseMagic(jClass, reader);
-        try self.parseConstants(jClass, reader);
-        try self.parseMeta(jClass);
-        try self.parseInterfaces(jClass);
+        var recordPos: usize = eocd.off;
+        for (range(eocd.t_records)) |_, i| {
+            var record: JarRecord = try reader.readPos(recordPos, JarRecord);
+            var header: JarHeader = try reader.readPos(record.off, JarHeader);
 
-        try self.parseFields(jClass);
-        try self.parseMethods(jClass);
-
-        try self.parseAttributes();
-
-        return jClass;
-    }
-
-    pub fn parseMagic(self: *Self, 
-                jClass: *JClass, reader: Reader) !void {
-        jClass.magic = JMagic;
-        jClass.minor = try reader.read(u16);
-        jClass.major = try reader.read(u16);
-    }
-
-    pub fn parseConstants(self: *Self,
-                jClass: *JClass, reader: Reader) !void {
-        var constant_pool = std.ArrayList(JConst).init(self.jClassAllocator);
-        var constCount: u16 = try reader.read(u16);
-
-        defer constant_pool.deinit();
-
-        var i: usize = 1;
-        while (i < constCount) : (i = i + 1) {
-            var jConst: JConst = JConst{ .tag = @intToEnum(JConstTag, try reader.read(u8)) };
-            switch (jConst.tag) {
-                .class => {
-                    jConst.nameIndex = try reader.read(u16);
-                },
-
-                .fieldRef, .methodRef, .interfaceMethodRef => {
-                    jConst.classIndex = try reader.read(u16);
-                    jConst.nameIndex = try reader.read(u16);
-                },
-
-                .stringRef => {
-                    jConst.stringIndex = try reader.read(u16);
-                },
-
-                .integer => {
-                    jConst.integer = try reader.read(i32);
-                },
-
-                .long => {
-                    jConst.long = try reader.read(i64);
-                },
-
-                .float => {
-                    jConst.float = try reader.read(f32);
-                },
-
-                .double => {
-                    jConst.double = try reader.read(f64);
-                },
-
-                .nameAndType => {
-                    jConst.nameIndex = try reader.read(u16);
-                    jConst.descIndex = try reader.read(u16);
-                },
-
-                .string => {
-                    var stringLen = try reader.read(u16);
-                    jConst.string = try reader.readBytes(stringLen);
-                },
-
-                else => {
-                    log.err("[P] Unsupported Tag: {}", .{jConst.tag});
-                    return error.JConstUnsupportedTag;
-                }
+            if (record.magic != JarRecordMagic or
+                header.magic != JarHeaderMagic) {
+                break;
             }
 
-            try constant_pool.append(jConst);
-            if (jConst.tag == JConstTag.double or jConst.tag == JConstTag.long) {
-                try constant_pool.append(JConst{ .tag = JConstTag.integer });
-                i = i + 1;
+            var file_name = try reader.readBytesPos(record.off + @sizeOf(JarHeader), header.name_len);
+
+            if (record.cmpSz == 0 or
+                record.dmpSz == 0 or
+                !mem.endsWith(u8, file_name, ".class")) {
+                recordPos = recordPos + record.size();
+                continue;
+            }            
+
+            switch (header.compress) {
+                Compress.None => {
+                    var classBuf = try reader.readBytesPos(
+                        record.off + header.size(),
+                        header.dmpSz
+                    );
+                    var class: JClass = try self.parser
+                                .parseClass(classBuf);
+                    try classes.append(class);
+                },
+
+                Compress.Deflate => {
+                    var classCmpBuf = try reader.readBytesPos(
+                        record.off + header.size(),
+                        header.cmpSz
+                    );
+
+                    var classDmpReader = io.fixedBufferStream(classCmpBuf).reader();
+                    var classDmpSlice = try self.allocator().alloc(u8, 32 * 1024);
+                    defer self.allocator().free(classDmpSlice);
+                    var classDmpInflater = zip.inflateStream(classDmpReader, classDmpSlice);
+
+                    var classDmpBuf = try self.allocator().alloc(u8, record.dmpSz);
+                    defer self.allocator().free(classDmpBuf);
+                    _ = try classDmpInflater.read(classDmpBuf);
+
+                    var class: JClass = try self.parser
+                                .parseClass(classDmpBuf);
+                    try classes.append(class);
+                },
+
+                else => log.err("[L] Invalid ZIP Compression.", .{})
             }
+
+            recordPos = recordPos + record.size();
         }
 
-        jClass.constant_pool =  constant_pool.toOwnedSlice();
-    }
-
-    pub fn parseMeta(self: *Self) !void {
-        self.flags = try self.reader.read(u16);
-
-        self.name = try self.resolveString(try self.reader.read(u16));
-        self.super = try self.resolveString(try self.reader.read(u16));
-    }
-
-    pub fn parseInterfaces(self: *Self) !void {
-        var interfaceCount: u16 = try self.reader.read(u16);
-        self.interfaces = std.ArrayList([]u8).init(self.allocator);
-
-        var i: usize = 0;
-        while (i < interfaceCount) : (i = i + 1) {
-            var stringIndex: u16 = try self.reader.read(u16);
-            var string: []u8 = try self.resolveString(stringIndex);
-            try self.interfaces.append(string);
-        }
-    }
-
-    fn parseAttributeTag(_: *Self, name: []u8) !JAttributeTag {
-        var tag: ?JAttributeTag = std.meta.stringToEnum(JAttributeTag, name);
-        if (tag != null) return tag.? else return error.JAttributeTagNotFound;
-    }
-
-    pub fn parseAttributes(self: *Self) !std.ArrayList(JAttribute) {
-        var attributesCount: u16 = try self.reader.read(u16);
-        var attributes = std.ArrayList(JAttribute).init(self.allocator);
-
-        var i: usize = 0;
-        while (i < attributesCount) : (i = i + 1) {
-            try attributes.append(JAttribute{
-                .name = try self.resolveString(try self.reader.read(u16)),
-                .data = try self.reader.readBytes(try self.reader.read(u32)),
-                .tag = undefined
-            });
-
-            attributes.items[attributes.items.len - 1].tag = try self.parseAttributeTag(attributes.items[attributes.items.len - 1].name);
-        }
-
-        return attributes;
-    }
-
-    pub fn parseFields(self: *Self) !void {
-        var fieldsCount: u16 = try self.reader.read(u16);
-        self.fields = std.ArrayList(JField).init(self.allocator);
-
-        var i: usize = 0;
-        while (i < fieldsCount) : (i = i + 1) {
-            try self.fields.append(JField{
-                .flags = try self.reader.read(u16),
-                .name = try self.resolveString(try self.reader.read(u16)),
-                .desc = try self.resolveString(try self.reader.read(u16)),
-                .attributes = (try self.parseAttributes()).items
-            });
-        }
-    }
-
-    pub fn parseMethods(self: *Self) !void {
-        var methodsCount: u16 = try self.reader.read(u16);
-        self.methods = std.ArrayList(JMethod).init(self.allocator);
-
-        var i: usize = 0;
-        while (i < methodsCount) : (i = i + 1) {
-            try self.methods.append(JMethod{
-                .flags = try self.reader.read(u16),
-                .name = try self.resolveString(try self.reader.read(u16)),
-                .desc = try self.resolveString(try self.reader.read(u16)),
-                .attributes = (try self.parseAttributes()).items
-            });
-        }
-    }
-
-    fn resolveString(self: *Self, index: u16) ![]u8 {
-        if ((index - 1) > self.constant_pool.items.len) {
-            return error.JConstIndexOutOfBounds;
-        }
-
-        var jConst: JConst = self.constant_pool.items[index - 1];
-        switch (jConst.tag) {
-            .string => {
-                var string: []u8 = try self.allocator.alloc(u8, jConst.string.len);
-                errdefer self.allocator.free(string);
-
-                std.mem.copy(u8, string, jConst.string);
-
-                return string;
-            },
-
-            .stringRef => {
-                return self.resolveString(jConst.stringIndex);
-            },
-
-            .class, .nameAndType => {
-                return self.resolveString(jConst.nameIndex);
-            },
-
-            else => {
-                return error.JConstStringNotFound;
-            }
-        }
+        return classes.toOwnedSlice();
     }
 };

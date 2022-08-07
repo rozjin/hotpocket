@@ -1,9 +1,10 @@
 const std = @import("std");
 const log = std.log;
 
-const vm = @import("vm.zig");
+const vmDef = @import("vm.zig");
+const VM = vmDef.VM;
 
 pub fn main() !void {
-    var hpkt: vm.VM = .{};
-    try hpkt.init("test/Add.class");
+    var hpkt: VM = VM.init();
+    try hpkt.load("/home/racemus/projects/hotpocket/jvm/jars/glushed-agent.jar");
 }
