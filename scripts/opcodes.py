@@ -6,7 +6,7 @@ op_template_end = '\n' + "};"
 
 op_list = []
 op_regex = r"((?P<Op>\w+)\s*=\s*[0-9]+\s*(?:\((?P<Hex>0x[0-9A-Fa-f]+)\)))+"
-reader = PdfReader("opcodes.pdf")
+reader = PdfReader("scripts/opcodes.pdf")
 for op_page in reader.pages:
     matches = re.findall(op_regex, op_page.extract_text())
     if not matches:

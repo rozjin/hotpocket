@@ -26,6 +26,7 @@ pub const JClass = struct {
 
     pub const JConst = struct {
         tag: JConstTag,
+
         nameIndex: u16 = undefined,
         classIndex: u16 = undefined,
         nameAndTypeIndex: u16 = undefined,
@@ -66,7 +67,7 @@ pub const JClass = struct {
         RuntimeInvisibleTypeAnnotations,
         AnnotationDefault,
         BootstrapMethods,
-        
+
         MethodParameters,
         Module,
         ModulePackages,
@@ -78,23 +79,74 @@ pub const JClass = struct {
     };
 
     pub const JAttribute = struct {
-        name: []u8,
-        data: []u8,
-        tag: JAttributeTag
+        pub const JCode = struct {
+            pub const JErrorFn = struct {
+                startPc: u16,
+                endPc: u16,
+                handlerPc: u16,
+
+                catchKind: JConst = undefined
+            };
+
+            maxStack: u16 = undefined,
+            maxLocals: u16 = undefined,
+            code: []u8 = undefined,
+            exceptions: []JErrorFn = undefined,
+            attributes: []JAttribute = undefined,
+        };
+
+        pub const JInnerClass = struct {
+            innerInfoIndex: u16,
+            outerInfoIndex: u16,
+
+            innerNameIndex: u16,
+            innerAccessFlag: u16
+        };
+
+        pub const JEnclosingMethod = struct {
+            classIndex: u16,
+            methodIndex: u16
+        };
+
+        tag: JAttributeTag,
+        len: u32 = undefined,
+
+        jConst: u16 = undefined,
+        jCode: JCode = undefined,
+        jErrors: []JConst = undefined,
+        jInnerClasses: []JInnerClass = undefined,
+
+        jEnclosingMethod: JEnclosingMethod = undefined,
+        jSynthetic: bool = undefined,
+        jSignature: u16,
+
+        jSource: u16
     };
 
     pub const JField = struct {
         flags: u16,
         name: []u8,
         desc: []u8,
-        attributes: []JAttribute
+        attributes: []JAttribute,
+
+        pub fn find(self: *JField, tag: JAttributeTag) JAttribute {
+            for (self.attributes) |jAttribute| {
+                if (jAttribute.tag == tag) return jAttribute;
+            }
+        }
     };
 
     pub const JMethod = struct {
         flags: u16,
         name: []u8,
         desc: []u8,
-        attributes: []JAttribute
+        attributes: []JAttribute,
+
+        pub fn find(self: *JMethod, tag: JAttributeTag) JAttribute {
+            for (self.attributes) |jAttribute| {
+                if (jAttribute.tag == tag) return jAttribute;
+            }
+        }
     };
 
     constant_pool: []JConst = undefined,
@@ -112,8 +164,35 @@ pub const JClass = struct {
     major: u16 = undefined,
 
     const Self = @This();
-    
-    pub fn init() Self {
-        return Self {};
+
+    pub fn info(self: *Self) !void {
+        log.info("[K] Name => {s}", .{self.name});
+        log.info("[K] Super => {s}", .{self.super});
+        if (self.super.len > 0) {
+            log.info("[K] Flags => 0x{x}", .{self.flags});
+        }
+
+        log.info("[K] CP Size => {}", .{self.constant_pool.len});
+        for (self.constant_pool) |jConst| {
+            log.info("[K] CP Item Tag: 0x{x}", .{@enumToInt(jConst.tag)});
+        }
+
+        log.info("[K] IF Size => {}", .{self.interfaces.len});
+        log.info("[K] FL Size => {}", .{self.fields.len});
+        log.info("[K] MT Size => {}", .{self.methods.len});
+        for (self.methods) |jMethod| {
+           log.info("[K] MT Attributes :=> {} items", .{jMethod.attributes.len});
+           for (jMethod.attributes) |jMethodAttribute| {
+                log.info("[K] MT Attribute: {s}", .{@tagName(jMethodAttribute.tag)});
+            }
+        }
+
+        log.info("[K] AT Size => {}", .{self.attributes.len});
+    }
+
+    pub fn find(self: *Self, tag: JAttributeTag) JAttribute {
+        for (self.attributes) |jAttribute| {
+            if (jAttribute.tag == tag) return jAttribute;
+        }
     }
 };

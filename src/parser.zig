@@ -1,4 +1,5 @@
 const std = @import("std");
+const heap = std.heap;
 const io = std.io;
 const log = std.log;
 const mem = std.mem;
@@ -8,39 +9,38 @@ const jClassDef = @import("class.zig");
 const rangeDef = @import("range.zig");
 
 const range = rangeDef.range;
+const stringToEnum = std.meta.stringToEnum;
 
 const Reader = jReaderDef.Reader;
 
 const JClass = jClassDef.JClass;
+
 const JAttribute = JClass.JAttribute;
 const JAttributeTag = JClass.JAttributeTag;
+const JCode = JAttribute.JCode;
+
 const JConst = JClass.JConst;
 const JConstTag = JClass.JConstTag;
 const JField = JClass.JField;
 const JMethod = JClass.JMethod;
 
 pub const JClassParser = struct {
-    jClassArena: std.heap.ArenaAllocator = undefined,
-    parserArena: std.heap.ArenaAllocator = undefined,
-
     const Self = @This();
     const JMagic = 0xCAFEBABE;
 
+    jClassArena: heap.ArenaAllocator = undefined,
+    parserArena: heap.ArenaAllocator = undefined,
+
     pub fn init() Self {
+        var jClassArena = heap.ArenaAllocator
+                .init(heap.page_allocator);
+        var parserArena = heap.ArenaAllocator
+                .init(heap.page_allocator);
+
         return Self {
-            .jClassArena = std.heap.ArenaAllocator
-                .init(std.heap.page_allocator),
-            .parserArena = std.heap.ArenaAllocator
-                .init(std.heap.page_allocator)
+            .jClassArena = jClassArena,
+            .parserArena = parserArena
         };
-    }
-
-    fn allocator(self: *Self) *std.mem.Allocator {
-        return &self.parserArena.allocator;
-    }
-
-    fn jClassAllocator(self: *Self) *std.mem.Allocator {
-        return &self.jClassArena.allocator;
     }
 
     pub fn parseClass(self: *Self, buf: []u8) !JClass {
@@ -52,8 +52,10 @@ pub const JClassParser = struct {
             return error.JBadMagicNumber;
         }
 
-        var jClass: *JClass = try self.jClassAllocator().create(JClass);
-        defer self.jClassAllocator().destroy(jClass);
+        const jClassAllocator = self.jClassArena.allocator();
+
+        var jClass: *JClass = try jClassAllocator.create(JClass);
+        defer jClassAllocator.destroy(jClass);
 
         try self.parseMagic(jClass, reader);
         try self.parseConstants(jClass, reader);
@@ -68,7 +70,7 @@ pub const JClassParser = struct {
         return jClass.*;
     }
 
-    fn parseMagic(self: *Self,
+    fn parseMagic(_: *Self,
                 jClass: *JClass, reader: *Reader) !void {
         jClass.magic = JMagic;
         jClass.minor = try reader.read(u16);
@@ -77,42 +79,28 @@ pub const JClassParser = struct {
 
     fn parseConstants(self: *Self,
                 jClass: *JClass, reader: *Reader) !void {
+        const allocator = self.parserArena.allocator();
+
         var constCount: u16 = try reader.read(u16);
-        var constant_pool = std.ArrayList(JConst).init(self.allocator());
+        var constant_pool = std.ArrayList(JConst).init(allocator);
         defer constant_pool.deinit();
 
         var i: usize = 1;
         while (i < constCount) : (i = i + 1) {
             var jConst: JConst = JConst{ .tag = @intToEnum(JConstTag, try reader.read(u8)) };
             switch (jConst.tag) {
-                .class, .module, .package => {
-                    jConst.nameIndex = try reader.read(u16);
-                },
+                .class, .module, .package => jConst.nameIndex = try reader.read(u16),
 
                 .fieldRef, .methodRef, .interfaceMethodRef => {
                     jConst.classIndex = try reader.read(u16);
                     jConst.nameIndex = try reader.read(u16);
                 },
 
-                .stringRef => {
-                    jConst.stringIndex = try reader.read(u16);
-                },
-
-                .integer => {
-                    jConst.integer = try reader.read(i32);
-                },
-
-                .long => {
-                    jConst.long = try reader.read(i64);
-                },
-
-                .float => {
-                    jConst.float = try reader.read(f32);
-                },
-
-                .double => {
-                    jConst.double = try reader.read(f64);
-                },
+                .stringRef => jConst.stringIndex = try reader.read(u16),
+                .integer => jConst.integer = try reader.read(i32),
+                .long => jConst.long = try reader.read(i64),
+                .float => jConst.float = try reader.read(f32),
+                .double => jConst.double = try reader.read(f64),
 
                 .nameAndType => {
                     jConst.nameIndex = try reader.read(u16);
@@ -160,17 +148,19 @@ pub const JClassParser = struct {
         if (superIndex > 0) {
             jClass.super = try self.resolveString(superIndex, jClass, reader);
         } else {
-            jClass.super = @as([*]u8, undefined)[0];
+            jClass.super = &[_]u8 {};
         }
     }
 
     fn parseInterfaces(self: *Self,
                 jClass: *JClass, reader: *Reader) !void {
+        const allocator = self.parserArena.allocator();
+
         var interfaceCount: u16 = try reader.read(u16);
-        var interfaces = std.ArrayList([]u8).init(self.allocator());
+        var interfaces = std.ArrayList([]u8).init(allocator);
         defer interfaces.deinit();
 
-        for (range(interfaceCount)) |_, i| {
+        for (range(interfaceCount)) |_| {
             var stringIndex: u16 = try reader.read(u16);
             var string: []u8 = try self.resolveString(stringIndex, jClass, reader);
             try interfaces.append(string);
@@ -180,47 +170,127 @@ pub const JClassParser = struct {
     }
 
     fn parseAttributeTag(_: *Self, name: []u8) !JAttributeTag {
-        var tag: ?JAttributeTag = std.meta.stringToEnum(JAttributeTag, name);
+        var tag: ?JAttributeTag = stringToEnum(JAttributeTag, name);
         if (tag != null) return tag.? else return error.JAttributeTagNotFound;
     }
 
-    fn parseSubAttributes(self: *Self,
+    fn parseErrorFns(self: *Self,
+                jClass: *JClass, reader: *Reader) ![]JCode.JErrorFn {
+        const allocator = self.parserArena.allocator();
+
+        var errorFnCount: u16 = try reader.read(u16);
+        var errorFns = std.ArrayList(JCode.JErrorFn).init(allocator);
+        defer errorFns.deinit();
+
+        for (range(errorFnCount)) |_| {
+            try errorfns.append(JCode.JErrorFn{
+                .startPc = try reader.read(u16),
+                .endPc = try reader.read(u16),
+                .handlerPc = try reader.read(u16),
+                .catchKind = if (try reader.read(u16) - 1 > 0) |index| jClass.constant_pool[index]
+            });
+        }
+
+        return errorFns.toOwnedSlice();
+    }
+
+    fn parseAttributes(self: *Self,
                 jClass: *JClass, reader: *Reader) ![]JAttribute {
+        const allocator = self.parserArena.allocator();
+
         var attributesCount: u16 = try reader.read(u16);
-        var attributes = std.ArrayList(JAttribute).init(self.allocator());
+        var attributes = std.ArrayList(JAttribute).init(allocator);
         defer attributes.deinit();
 
-        for (range(attributesCount)) |_, i| {
-            try attributes.append(JAttribute{
-                .name = try self.resolveString(try reader.read(u16), jClass, reader),
-                .data = try reader.readBytes(try reader.read(u32)),
-                .tag = undefined
-            });
+        for (range(attributesCount)) |_| {
+            var jAttribute: JAttribute = JAttribute {
+                .tag = self.parseAttributeTag(try self.resolveString(try reader.read(u16), jClass, reader)),
+                .len = try reader.read(u32)
+            };
 
-            attributes.items[attributes.items.len - 1].tag = try self.parseAttributeTag(attributes.items[attributes.items.len - 1].name);
+            switch (jAttribute.tag) {
+                .ConstantValue => jAttribute.jConst = try reader.read(u16),
+
+                .Code => {
+                    jAttribute.jCode = JCode{
+                        .maxStack = try reader.read(u16),
+                        .maxLocals = try reader.read(u16),
+
+                        .code = try reader.readBytes(try reader.read(u32)),
+                        .exceptions = try self.parseErrorFns(jClass, reader),
+                        .attributes = try self.parseAttributes(jClass, reader)
+                    };
+                },
+
+                .Exceptions => {
+                    var errorCount: u16 = try reader.read(u16);
+                    var errors = std.ArrayList(JConst).init(allocator);
+                    defer errors.deinit();
+
+                    for (range(errorCount)) |_| {
+                        errors.append(jClass.constant_pool[try reader.read(u16) - 1]);
+                    }
+
+                    jAttribute.jErrors = errors.toOwnedSlice();
+                },
+
+                .InnerClasses => {
+                    var innerClassesCount: u16 = try reader.read(u16);
+                    var innerClasses = std.ArrayList(JAttribute.JInnerClass).init(allocator);
+                    defer innerClasses.deinit();
+
+                    for (range(innerClassesCount)) |_| {
+                        innerClasses.append(JAttribute.JInnerClass{
+                            .innerInfoIndex = jClass.constant_pool[try reader.read(u16) - 1],
+                            .outerInfoIndex = jClass.constant_pool[try reader.read(u16) - 1],
+
+                            .innerNameIndex = if (try reader.read(u16) - 1 > 0) |index| jClass.constant_pool[index],
+                            .innerAccessFlag = try reader.read(u16)
+                        });
+                    }
+
+                    jAttribute.jInnerClasses = innerClasses.toOwnedSlice();
+                },
+
+                .EnclosingMethod => {
+                    jAttribute.jEnclosingMethod = JAttribute.JEnclosingMethod{
+                        .classIndex = try reader.read(u16),
+                        .methodIndex = try reader.read(u16)
+                    };
+                },
+
+                .Synthetic => jAttribute.jSynthetic = true,
+                .Signature => jAttribute.jSignature = try reader.read(u16),
+                .SourceFile => jAttribute.jSource = try reader.read(u16),
+
+                else => log.info("[P] Unsupported Attribute: {}", .{jAttribute.tag})
+            }
+
+            try attributes.append(jAttribute);
         }
 
         return attributes.toOwnedSlice();
     }
 
-    fn parseAttributes(self: *Self,
+    fn parseClassAttributes(self: *Self,
                 jClass: *JClass, reader: *Reader) !void {
-        var attributes = try self.parseSubAttributes(jClass, reader);
-        jClass.attributes = attributes;
+        jClass.attributes = try self.parseAttributes(jClass, reader);
     }
 
     fn parseFields(self: *Self,
                 jClass: *JClass, reader: *Reader) !void {
+        const allocator = self.parserArena.allocator();
+
         var fieldsCount: u16 = try reader.read(u16);
-        var fields = std.ArrayList(JField).init(self.allocator());
+        var fields = std.ArrayList(JField).init(allocator);
         defer fields.deinit();
 
-        for (range(fieldsCount)) |_, i| {
+        for (range(fieldsCount)) |_| {
             try fields.append(JField{
                 .flags = try reader.read(u16),
                 .name = try self.resolveString(try reader.read(u16), jClass, reader),
                 .desc = try self.resolveString(try reader.read(u16), jClass, reader),
-                .attributes = try self.parseSubAttributes(jClass, reader)
+                .attributes = try self.parseAttributes(jClass, reader)
             });
         }
 
@@ -229,16 +299,18 @@ pub const JClassParser = struct {
 
     fn parseMethods(self: *Self,
                 jClass: *JClass, reader: *Reader) !void {
+        const allocator = self.parserArena.allocator();
+
         var methodsCount: u16 = try reader.read(u16);
-        var methods = std.ArrayList(JMethod).init(self.allocator());
+        var methods = std.ArrayList(JMethod).init(allocator);
         methods.deinit();
 
-        for (range(methodsCount)) |_, i| {
+        for (range(methodsCount)) |_| {
             try methods.append(JMethod{
                 .flags = try reader.read(u16),
                 .name = try self.resolveString(try reader.read(u16), jClass, reader),
                 .desc = try self.resolveString(try reader.read(u16), jClass, reader),
-                .attributes = try self.parseSubAttributes(jClass, reader)
+                .attributes = try self.parseAttributes(jClass, reader)
             });
         }
 
@@ -247,15 +319,18 @@ pub const JClassParser = struct {
 
     fn resolveString(self: *Self, index: u16,
                 jClass: *JClass, reader: *Reader) ![]u8 {
-        if ((index - 1) > jClass.constant_pool.len) {
+        if ((index - 1) > jClass.constant_pool.len or
+            index <= 0) {
             return error.JConstIndexOutOfBounds;
         }
+
+        const allocator = self.parserArena.allocator();
 
         var jConst: JConst = jClass.constant_pool[index - 1];
         switch (jConst.tag) {
             .string => {
-                var string: []u8 = try self.allocator().alloc(u8, jConst.string.len);
-                errdefer self.allocator().free(string);
+                var string: []u8 = try allocator.alloc(u8, jConst.string.len);
+                errdefer allocator.free(string);
 
                 std.mem.copy(u8, string, jConst.string);
 

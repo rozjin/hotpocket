@@ -1,4 +1,5 @@
 const std = @import("std");
+const heap = std.heap;
 const fs = std.fs;
 const io = std.io;
 const log = std.log;
@@ -84,29 +85,29 @@ pub const JLoader = struct {
     };
 
     parser: JClassParser = undefined,
-    arena: std.heap.ArenaAllocator = undefined,
+    arena: heap.ArenaAllocator = undefined,
 
     const Self = @This();
 
     pub fn init() Self {
+        var arena = heap.ArenaAllocator
+                .init(heap.page_allocator);
+
         return Self {
             .parser = JClassParser.init(),
-            .arena = std.heap.ArenaAllocator
-                .init(std.heap.page_allocator)
+            .arena = arena,
         };
     }
 
-    fn allocator(self: *Self) *std.mem.Allocator {
-        return &self.arena.allocator;
-    }
-
     pub fn loadClass(self: *Self, class_path: []const u8) !JClass {
+        const allocator = self.arena.allocator();
+
         var class: File = try fs.openFileAbsolute(class_path, .{});
         var classtat: File.Stat = try class.stat();
         var classize: usize = classtat.size;
 
-        var buf = try self.allocator().alloc(u8, classize);
-        defer self.allocator().free(buf);
+        var buf = try allocator.alloc(u8, classize);
+        defer allocator.free(buf);
 
         _ = try class.read(buf);
 
@@ -114,7 +115,9 @@ pub const JLoader = struct {
     }
 
     pub fn loadJars(self: *Self, jars: [][]const u8) ![]JClass {
-        var jarClasses = std.ArrayList(JClass).init(self.allocator());
+        const allocator = self.arena.allocator();
+
+        var jarClasses = std.ArrayList(JClass).init(allocator);
         defer jarClasses.deinit();
 
         for (jars) |jar| {
@@ -134,8 +137,10 @@ pub const JLoader = struct {
             return error.JarUnderflow;
         }
 
-        var buf = try self.allocator().alloc(u8, jarsize);
-        defer self.allocator().free(buf);
+        const allocator = self.arena.allocator();
+
+        var buf = try allocator.alloc(u8, jarsize);
+        defer allocator.free(buf);
 
         _ = try jar.read(buf);
 
@@ -146,11 +151,11 @@ pub const JLoader = struct {
             return error.JarBadMagicNumber;
         }
 
-        var classes = std.ArrayList(JClass).init(self.allocator());
+        var classes = std.ArrayList(JClass).init(allocator);
         defer classes.deinit();
 
         var recordPos: usize = eocd.off;
-        for (range(eocd.t_records)) |_, i| {
+        for (range(eocd.t_records)) |_| {
             var record: JarRecord = try reader.readPos(recordPos, JarRecord);
             var header: JarHeader = try reader.readPos(record.off, JarHeader);
 
@@ -186,12 +191,12 @@ pub const JLoader = struct {
                     );
 
                     var classDmpReader = io.fixedBufferStream(classCmpBuf).reader();
-                    var classDmpSlice = try self.allocator().alloc(u8, 32 * 1024);
-                    defer self.allocator().free(classDmpSlice);
+                    var classDmpSlice = try allocator.alloc(u8, 32 * 1024);
+                    defer allocator.free(classDmpSlice);
                     var classDmpInflater = zip.inflateStream(classDmpReader, classDmpSlice);
 
-                    var classDmpBuf = try self.allocator().alloc(u8, record.dmpSz);
-                    defer self.allocator().free(classDmpBuf);
+                    var classDmpBuf = try allocator.alloc(u8, record.dmpSz);
+                    defer allocator.free(classDmpBuf);
                     _ = try classDmpInflater.read(classDmpBuf);
 
                     var class: JClass = try self.parser
