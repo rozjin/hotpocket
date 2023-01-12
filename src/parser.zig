@@ -44,7 +44,10 @@ pub const JClassParser = struct {
     }
 
     pub fn parseClass(self: *Self, buf: []u8) !JClass {
-        var reader: *Reader = &Reader.init(buf);
+        const allocator = self.parserArena.allocator();
+        var reader: *Reader = try allocator.create(Reader);
+        defer allocator.destroy(reader);
+        reader.* = Reader.init(buf);
 
         var magic: u32 = try reader.read(u32);
         if (magic != JMagic) {
@@ -56,7 +59,7 @@ pub const JClassParser = struct {
 
         var jClass: *JClass = try jClassAllocator.create(JClass);
         defer jClassAllocator.destroy(jClass);
-
+        
         try self.parseMagic(jClass, reader);
         try self.parseConstants(jClass, reader);
         try self.parseMeta(jClass, reader);
@@ -65,7 +68,7 @@ pub const JClassParser = struct {
         try self.parseFields(jClass, reader);
         try self.parseMethods(jClass, reader);
 
-        try self.parseAttributes(jClass, reader);
+        try self.parseClassAttributes(jClass, reader);
 
         return jClass.*;
     }
@@ -134,7 +137,7 @@ pub const JClassParser = struct {
             }
         }
 
-        jClass.constant_pool = constant_pool.toOwnedSlice();
+        jClass.constant_pool = try constant_pool.toOwnedSlice();
     }
 
     fn parseMeta(self: *Self,
@@ -166,12 +169,11 @@ pub const JClassParser = struct {
             try interfaces.append(string);
         }
 
-        jClass.interfaces = interfaces.toOwnedSlice();
+        jClass.interfaces = try interfaces.toOwnedSlice();
     }
 
-    fn parseAttributeTag(_: *Self, name: []u8) !JAttributeTag {
-        var tag: ?JAttributeTag = stringToEnum(JAttributeTag, name);
-        if (tag != null) return tag.? else return error.JAttributeTagNotFound;
+    fn parseAttributeTag(_: *Self, name: []u8) ?JAttributeTag {
+        return stringToEnum(JAttributeTag, name);
     }
 
     fn parseErrorFns(self: *Self,
@@ -183,15 +185,19 @@ pub const JClassParser = struct {
         defer errorFns.deinit();
 
         for (range(errorFnCount)) |_| {
-            try errorfns.append(JCode.JErrorFn{
+            var errorFn: JCode.JErrorFn = .{
                 .startPc = try reader.read(u16),
                 .endPc = try reader.read(u16),
-                .handlerPc = try reader.read(u16),
-                .catchKind = if (try reader.read(u16) - 1 > 0) |index| jClass.constant_pool[index]
-            });
+                .handlerPc = try reader.read(u16)
+            };
+
+            var catchKindIndex: u16 = try reader.read(u16);
+            if (catchKindIndex > 0) errorFn.catchKind = jClass.constant_pool[catchKindIndex - 1];
+
+            try errorFns.append(errorFn);
         }
 
-        return errorFns.toOwnedSlice();
+        return try errorFns.toOwnedSlice();
     }
 
     fn parseAttributes(self: *Self,
@@ -203,9 +209,16 @@ pub const JClassParser = struct {
         defer attributes.deinit();
 
         for (range(attributesCount)) |_| {
+            var jAttributeTag = self.parseAttributeTag(try self.resolveString(try reader.read(u16), jClass, reader));
+            var jAttributeLen = try reader.read(u32);
+            if (jAttributeTag == null) {
+                _ = try reader.readBytes(jAttributeLen);
+                continue;
+            }
+
             var jAttribute: JAttribute = JAttribute {
-                .tag = self.parseAttributeTag(try self.resolveString(try reader.read(u16), jClass, reader)),
-                .len = try reader.read(u32)
+                .tag = jAttributeTag.?,
+                .len = jAttributeLen
             };
 
             switch (jAttribute.tag) {
@@ -228,10 +241,10 @@ pub const JClassParser = struct {
                     defer errors.deinit();
 
                     for (range(errorCount)) |_| {
-                        errors.append(jClass.constant_pool[try reader.read(u16) - 1]);
+                        try errors.append(jClass.constant_pool[try reader.read(u16) - 1]);
                     }
 
-                    jAttribute.jErrors = errors.toOwnedSlice();
+                    jAttribute.jErrors = try errors.toOwnedSlice();
                 },
 
                 .InnerClasses => {
@@ -240,16 +253,24 @@ pub const JClassParser = struct {
                     defer innerClasses.deinit();
 
                     for (range(innerClassesCount)) |_| {
-                        innerClasses.append(JAttribute.JInnerClass{
-                            .innerInfoIndex = jClass.constant_pool[try reader.read(u16) - 1],
-                            .outerInfoIndex = jClass.constant_pool[try reader.read(u16) - 1],
+                        var innerInfoIndex = try reader.read(u16) - 1;
+                        var outerInfoIndex = try reader.read(u16);
+                        if (outerInfoIndex > 0) outerInfoIndex = outerInfoIndex - 1;
+                        if (outerInfoIndex == innerInfoIndex) return error.JInvalidInnerClass;
 
-                            .innerNameIndex = if (try reader.read(u16) - 1 > 0) |index| jClass.constant_pool[index],
-                            .innerAccessFlag = try reader.read(u16)
-                        });
+                        var innerClass: JAttribute.JInnerClass = .{
+                            .innerInfoIndex = innerInfoIndex,
+                            .outerInfoIndex = outerInfoIndex,
+                        };
+
+                        var innerNameIndex: u16 = try reader.read(u16);
+                        if (innerNameIndex > 0) innerClass.innerNameIndex = innerNameIndex;
+                        innerClass.innerAccessFlag = try reader.read(u16);                   
+
+                        try innerClasses.append(innerClass);
                     }
 
-                    jAttribute.jInnerClasses = innerClasses.toOwnedSlice();
+                    jAttribute.jInnerClasses = try innerClasses.toOwnedSlice();
                 },
 
                 .EnclosingMethod => {
@@ -263,13 +284,15 @@ pub const JClassParser = struct {
                 .Signature => jAttribute.jSignature = try reader.read(u16),
                 .SourceFile => jAttribute.jSource = try reader.read(u16),
 
-                else => log.info("[P] Unsupported Attribute: {}", .{jAttribute.tag})
+                else => {
+                    _ = try reader.readBytes(jAttribute.len);
+                }
             }
 
             try attributes.append(jAttribute);
         }
 
-        return attributes.toOwnedSlice();
+        return try attributes.toOwnedSlice();
     }
 
     fn parseClassAttributes(self: *Self,
@@ -294,7 +317,7 @@ pub const JClassParser = struct {
             });
         }
 
-        jClass.fields = fields.toOwnedSlice();
+        jClass.fields = try fields.toOwnedSlice();
     }
 
     fn parseMethods(self: *Self,
@@ -314,7 +337,7 @@ pub const JClassParser = struct {
             });
         }
 
-        jClass.methods = methods.toOwnedSlice();
+        jClass.methods = try methods.toOwnedSlice();
     }
 
     fn resolveString(self: *Self, index: u16,

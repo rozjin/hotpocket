@@ -6,6 +6,7 @@ const log = std.log;
 const mem = std.mem;
 const zip = std.compress.deflate;
 
+const Dir = fs.Dir;
 const File = fs.File;
 
 const jReaderDef = @import("reader.zig");
@@ -26,19 +27,19 @@ pub const JLoader = struct {
     };
 
     const JarHeaderMagic: u32 = 0x04034b50;
-    const JarHeader = packed struct {
-        magic: u32,
-        version: u16,
-        flag: u16,
-        compress: u16,
-        modTime: u16,
-        modDate: u16,
+    const JarHeader = extern struct {
+        magic: u32 align(1),
+        version: u16 align(1),
+        flag: u16 align(1),
+        compress: u16 align(1),
+        modTime: u16 align(1),
+        modDate: u16 align(1),
 
-        crc: u32,
-        cmpSz: u32,
-        dmpSz: u32,
-        name_len: u16,
-        extra_len: u16,
+        crc: u32 align(1),
+        cmpSz: u32 align(1),
+        dmpSz: u32 align(1),
+        name_len: u16 align(1),
+        extra_len: u16 align(1),
 
         pub fn size(self: *const JarHeader) usize {
             return @sizeOf(JarHeader) + self.name_len + self.extra_len;
@@ -47,25 +48,25 @@ pub const JLoader = struct {
 
     const JarRecordMagic: u32 = 0x02014b50;
     const JarRecordMax: u16 = 65535;
-    const JarRecord = packed struct {
-        magic: u32,
-        madeBy: u16,
-        version: u16,
-        flag: u16,
-        compress: u16,
-        modTime: u16,
-        modDate: u16,
+    const JarRecord = extern struct {
+        magic: u32 align(1),
+        madeBy: u16 align(1),
+        version: u16 align(1),
+        flag: u16 align(1),
+        compress: u16 align(1),
+        modTime: u16 align(1),
+        modDate: u16 align(1),
 
-        crc: u32,
-        cmpSz: u32,
-        dmpSz: u32,
-        name_len: u16,
-        extra_len: u16,
-        comment_len: u16,
-        disk: u16,
-        iAttr: u16,
-        eAttr: u32,
-        off: u32,
+        crc: u32 align(1),
+        cmpSz: u32 align(1),
+        dmpSz: u32 align(1),
+        name_len: u16 align(1),
+        extra_len: u16 align(1),
+        comment_len: u16 align(1),
+        disk: u16 align(1),
+        iAttr: u16 align(1),
+        eAttr: u32 align(1),
+        off: u32 align(1),
 
         pub fn size(self: *const JarRecord) usize {
             return @sizeOf(JarRecord) + self.name_len + self.extra_len + self.comment_len;
@@ -73,15 +74,15 @@ pub const JLoader = struct {
     };
 
     const JarEndMagic: u32 = 0x06054b50;
-    const JarEnd = packed struct {
-        magic: u32,
-        n_disk: u16,
-        s_disk: u16,
-        n_records: u16,
-        t_records: u16,
-        size: u32,
-        off: u32,
-        comment_len: u16
+    const JarEnd = extern struct {
+        magic: u32 align(1),
+        n_disk: u16 align(1),
+        s_disk: u16 align(1),
+        n_records: u16 align(1),
+        t_records: u16 align(1),
+        size: u32 align(1),
+        off: u32 align(1),
+        comment_len: u16 align(1),
     };
 
     parser: JClassParser = undefined,
@@ -129,23 +130,24 @@ pub const JLoader = struct {
     }
 
     fn loadJar(self: *Self, jar_path: []const u8) ![]JClass {
-        var jar: File = try fs.openFileAbsolute(jar_path, .{});
-        var jarstat: File.Stat = try jar.stat();
-        var jarsize: usize = jarstat.size;
+        var dir: Dir = fs.cwd();
+        var jar: File = try dir.openFile(jar_path, .{});
+        var jarStat: File.Stat = try jar.stat();
+        var jarSize: usize = jarStat.size;
 
-        if (jarsize < 22) {
+        if (jarSize < 22) {
             return error.JarUnderflow;
         }
 
         const allocator = self.arena.allocator();
 
-        var buf = try allocator.alloc(u8, jarsize);
+        var buf = try allocator.alloc(u8, jarSize);
         defer allocator.free(buf);
 
         _ = try jar.read(buf);
 
         var reader = Reader.init(buf);
-        var eocd: JarEnd = try reader.readEof(JarEnd);
+        var eocd: JarEnd = try reader.readEOF(JarEnd);
         if (eocd.magic != JarEndMagic) {
             log.err("[L] Bad magic number {x}", .{eocd.magic});
             return error.JarBadMagicNumber;
@@ -164,8 +166,7 @@ pub const JLoader = struct {
                 break;
             }
 
-            var file_name = try reader.readBytesPos(record.off + @sizeOf(JarHeader), header.name_len);
-
+            var file_name = try reader.readBytesPos(recordPos + @sizeOf(JarRecord), record.name_len);
             if (record.cmpSz == 0 or
                 record.dmpSz == 0 or
                 !mem.endsWith(u8, file_name, ".class")) {
@@ -173,31 +174,33 @@ pub const JLoader = struct {
                 continue;
             }            
 
-            switch (header.compress) {
+            log.info("[L] Loading class: {s}", .{ file_name });
+
+            switch (record.compress) {
                 Compress.None => {
                     var classBuf = try reader.readBytesPos(
                         record.off + header.size(),
-                        header.dmpSz
+                        record.dmpSz
                     );
-                    var class: JClass = try self.parser
-                                .parseClass(classBuf);
+                    
+                    var class: JClass = try self.parser.parseClass(classBuf);
                     try classes.append(class);
                 },
 
                 Compress.Deflate => {
                     var classCmpBuf = try reader.readBytesPos(
                         record.off + header.size(),
-                        header.cmpSz
+                        record.cmpSz
                     );
 
-                    var classDmpReader = io.fixedBufferStream(classCmpBuf).reader();
-                    var classDmpSlice = try allocator.alloc(u8, 32 * 1024);
-                    defer allocator.free(classDmpSlice);
-                    var classDmpInflater = zip.inflateStream(classDmpReader, classDmpSlice);
+                    var classCmpStream = io.fixedBufferStream(classCmpBuf);
+                    var classCmpReader = classCmpStream.reader();
+                    var classCmpInf = try zip.decompressor(allocator, classCmpReader, null);
 
                     var classDmpBuf = try allocator.alloc(u8, record.dmpSz);
                     defer allocator.free(classDmpBuf);
-                    _ = try classDmpInflater.read(classDmpBuf);
+                    var classDmpReader = classCmpInf.reader();
+                    _ = try classDmpReader.read(classDmpBuf);
 
                     var class: JClass = try self.parser
                                 .parseClass(classDmpBuf);

@@ -29,7 +29,7 @@ pub const Reader = struct {
         }
 
         var val: T = switch(@typeInfo(T)) {
-            .Int => @byteSwap(T, @ptrCast(*align(1) T, self.buf[begin..end]).*),
+            .Int => @byteSwap(@ptrCast(*align(1) T, self.buf[begin..end]).*),
             else => @ptrCast(*align(1) T, self.buf[begin..end]).*
         };
 
@@ -38,7 +38,7 @@ pub const Reader = struct {
         return val;
     }
 
-    pub fn readEof(self: *Self, comptime T: type) !T {
+    pub fn readEOF(self: *Self, comptime T: type) !T {
         var begin: usize = self.pos_eof - @sizeOf(T);
         var end: usize = self.pos_eof;
 
@@ -48,12 +48,10 @@ pub const Reader = struct {
 
         self.pos_eof = self.pos_eof - @sizeOf(T);
 
-        var val: T = switch(@typeInfo(T)) {
-            .Int => @byteSwap(T, @ptrCast(*align(1) T, self.buf[begin..end]).*),
+        return switch(@typeInfo(T)) {
+            .Int => @byteSwap(@ptrCast(*align(1) T, self.buf[begin..end]).*),
             else => @ptrCast(*align(1) T, self.buf[begin..end]).*
         };
-
-        return val;
     }
 
     pub fn readBytes(self: *Self, read_len: usize) ![]u8 {
@@ -104,7 +102,7 @@ pub const Reader = struct {
         }
 
         var val: T = switch(@typeInfo(T)) {
-            .Int => @byteSwap(T, @ptrCast(*align(1) T, self.buf[begin..end]).*),
+            .Int => @byteSwap(@ptrCast(*align(1) T, self.buf[begin..end]).*),
             else => @ptrCast(*align(1) T, self.buf[begin..end]).*
         };
 

@@ -33,77 +33,8 @@ const JErrorFn = JCode.JErrorFn;
 const Reader = readerDef.Reader;
 
 pub const VM = struct {
-    const VMNull: u64 = 0xAA;
-    const VMError = error {
-        Internal,
-        OutOfMemory,
-        StackOverflow,
-        Unknown
-    };
-    
-    const VMVar = union(enum) {
-        byte: i8,
-        short: i16,
-        int: i32,
-        long: i64,
-        float: f32,
-        double: f64,
-        boolean: bool,
-        ref: u64,
-    };
-
-    const VMObject = struct {
-        vars: []VMVar,
-        
-    };
-
-    const VMFrame = struct {
-        method: *JClass.JMethod = undefined,
-        class: *JClass = undefined,
-        ip: u32 = undefined,
-        code: []u8 = undefined,
-        locals: *GCContext = undefined,
-        stack: *GCContext = undefined,
-
-        locals_size: usize = undefined,
-        stack_size: usize = undefined,
-
-        errors: []JErrorFn = undefined,
-
-        const Self = @This();
-
-        fn init(self: *Self, 
-                jClass: *JClass, jObject: ?*VMObject,
-                jMethod: *JMethod,
-                jArgs: []VMVar, jGC: GC) Self {
-            if (jObject) ctx.push(@ptrToInt(jObject.?));
-            for (jArgs) |jArg| {
-                ctx.prod(jArg); 
-            }
-
-            var jCodeAttr: JAttribute = jMethod.find(JAttributeTag.Code);
-            var jCode: JCode = jCodeAttr.jCode;
-            return Self {
-                .method = jMethod,
-                .class = jClass,
-                
-                .ip = 0,
-                
-                .code = jCode.code,
-                .locals = try jGC.make(),
-                .stack = try jGC.make(),
-
-                .locals_size = jCode.maxStack,
-                .stack_size = jCode.maxLocals,
-
-                .errors = jCode.exceptions
-            }; 
-        }
-    };
-
     jClasses: []JClass = undefined,
 
-    jFrames: []VMFrame = undefined,
     jFramesSize: u32 = undefined,
     jFramesMax: u32 = undefined,
 
@@ -146,24 +77,4 @@ pub const VM = struct {
 
         log.info("[K] Done.", .{});
     }
-
-    fn invoke(self: *Self, kind: Invoke, 
-              jClass: *JClass, jObject: ?*VMObject,
-              jMethod: *JMethod,
-              jArgs: []VMVar) !VMFrame {
-        var jMem = self.jGPA.allocator();
-        var jFrame: *VMFrame = try jMem.create(VMFrame);
-        jFrame.init(jClass, jObject, jMethod, jArgs, self.jGC);
-
-        switch (kind) {
-            .STATIC => {
-                self.jit(jClass, jObject)
-            },
-
-            else => log.warn("[K] Unsupported Method Kind", .{})
-        }
-    }
-
-    fn jit(self: *Self,
-           jClass: *JClass, jObject: ?*VMObject)
 };

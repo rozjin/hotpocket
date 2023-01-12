@@ -96,11 +96,11 @@ pub const JClass = struct {
         };
 
         pub const JInnerClass = struct {
-            innerInfoIndex: u16,
-            outerInfoIndex: u16,
+            innerInfoIndex: u16 = undefined,
+            outerInfoIndex: u16 = undefined,
 
-            innerNameIndex: u16,
-            innerAccessFlag: u16
+            innerNameIndex: u16 = undefined,
+            innerAccessFlag: u16 = undefined,
         };
 
         pub const JEnclosingMethod = struct {
@@ -118,9 +118,9 @@ pub const JClass = struct {
 
         jEnclosingMethod: JEnclosingMethod = undefined,
         jSynthetic: bool = undefined,
-        jSignature: u16,
+        jSignature: u16 = undefined,
 
-        jSource: u16
+        jSource: u16 = undefined
     };
 
     pub const JField = struct {
